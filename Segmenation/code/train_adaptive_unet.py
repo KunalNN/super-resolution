@@ -14,11 +14,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import tensorflow as tf
@@ -37,6 +38,8 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))  # because Shared is t
 from dataset_paths import (  # noqa: E402
     LOG_ROOT,
     MODEL_ROOT,
+    TEST_IMAGE_DIR,
+    TEST_MASK_DIR,
     TRAIN_IMAGE_DIR,
     TRAIN_MASK_DIR,
     VALID_IMAGE_DIR,
@@ -59,6 +62,7 @@ DEFAULT_THRESHOLD = 0.5
 
 
 def set_global_seed(seed: int) -> None:
+    random.seed(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
 
@@ -135,6 +139,55 @@ def collect_isic_pairs(image_dir: Path, mask_dir: Path) -> List[Tuple[str, str]]
     return pairs
 
 
+def _coerce_manifest_pairs(split: str, entries: Iterable[Iterable[str]]) -> List[Tuple[str, str]]:
+    """Validate and normalise manifest pairs for a particular split."""
+    normalised: List[Tuple[str, str]] = []
+    for idx, pair in enumerate(entries):
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            raise ValueError(f"Malformed entry #{idx} in '{split}' manifest")
+        image_path, mask_path = pair
+        if not image_path or not mask_path:
+            raise ValueError(f"Empty path in '{split}' manifest entry #{idx}")
+        image = Path(str(image_path)).expanduser()
+        mask = Path(str(mask_path)).expanduser()
+        if not image.exists():
+            raise FileNotFoundError(f"Manifest references missing image: {image}")
+        if not mask.exists():
+            raise FileNotFoundError(f"Manifest references missing mask: {mask}")
+        normalised.append((str(image), str(mask)))
+    return normalised
+
+
+def load_pairs_manifest(path: Path) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError(f"Manifest at {path} must be a JSON object.")
+    if "train" not in data or "val" not in data:
+        raise ValueError(f"Manifest at {path} missing 'train' or 'val' keys.")
+    train_pairs = _coerce_manifest_pairs("train", data["train"])
+    val_pairs = _coerce_manifest_pairs("val", data["val"])
+    return train_pairs, val_pairs
+
+
+def write_pairs_manifest(
+    path: Path,
+    train_pairs: List[Tuple[str, str]],
+    val_pairs: List[Tuple[str, str]],
+    *,
+    metadata: Dict[str, str] | None = None,
+) -> None:
+    payload: Dict[str, object] = {
+        "version": 1,
+        "created": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "train": train_pairs,
+        "val": val_pairs,
+    }
+    if metadata:
+        payload["metadata"] = metadata
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2))
+
+
 def load_isic_image(path: tf.Tensor, size: int) -> tf.Tensor:
     image = tf.io.read_file(path)
     image = tf.image.decode_image(image, channels=3, expand_animations=False)
@@ -198,10 +251,16 @@ def build_isic_dataset(
     augment: bool,
     shuffle: bool,
     seed: int,
+    pairs: Optional[List[Tuple[str, str]]] = None,
 ) -> Tuple[tf.data.Dataset, int]:
     """Construct a tf.data pipeline for ISIC segmentation pairs."""
-    pairs = collect_isic_pairs(image_dir, mask_dir)
-    ds = tf.data.Dataset.from_tensor_slices(pairs)
+    if pairs is None:
+        pairs = collect_isic_pairs(image_dir, mask_dir)
+    if not pairs:
+        raise ValueError(f"No image/mask pairs found for {image_dir} / {mask_dir}")
+
+    image_paths, mask_paths = zip(*pairs)
+    ds = tf.data.Dataset.from_tensor_slices((list(image_paths), list(mask_paths)))
 
     if shuffle:
         ds = ds.shuffle(buffer_size=len(pairs), seed=seed, reshuffle_each_iteration=True)
@@ -228,6 +287,8 @@ def prepare_isic_train_val_datasets(
     train_batch_size: int,
     val_batch_size: int,
     seed: int,
+    train_pairs: Optional[List[Tuple[str, str]]] = None,
+    val_pairs: Optional[List[Tuple[str, str]]] = None,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, int, int]:
     """Build tf.data pipelines for the official ISIC-2017 train/validation splits."""
     train_ds, train_count = build_isic_dataset(
@@ -238,6 +299,7 @@ def prepare_isic_train_val_datasets(
         augment=True,
         shuffle=True,
         seed=seed,
+        pairs=train_pairs,
     )
     val_ds, val_count = build_isic_dataset(
         val_image_dir,
@@ -247,6 +309,7 @@ def prepare_isic_train_val_datasets(
         augment=False,
         shuffle=False,
         seed=seed,
+        pairs=val_pairs,
     )
     return train_ds, val_ds, train_count, val_count
 
@@ -475,10 +538,41 @@ def train(args: argparse.Namespace) -> None:
         else:
             mixed_precision.set_global_policy("mixed_float16")
 
+    if args.refresh_pairs_manifest and not args.pairs_manifest:
+        raise ValueError("--refresh_pairs_manifest requires --pairs_manifest")
+
     train_images = Path(args.train_images or TRAIN_IMAGE_DIR).expanduser()
     train_masks = Path(args.train_masks or TRAIN_MASK_DIR).expanduser()
     val_images = Path(args.val_images or VALID_IMAGE_DIR).expanduser()
     val_masks = Path(args.val_masks or VALID_MASK_DIR).expanduser()
+    test_images = Path(args.test_images or TEST_IMAGE_DIR).expanduser()
+    test_masks = Path(args.test_masks or TEST_MASK_DIR).expanduser()
+
+    manifest_path: Optional[Path] = None
+    train_pairs: Optional[List[Tuple[str, str]]] = None
+    val_pairs: Optional[List[Tuple[str, str]]] = None
+    if args.pairs_manifest:
+        manifest_path = Path(args.pairs_manifest).expanduser()
+        if manifest_path.exists() and not args.refresh_pairs_manifest:
+            print(f"[data] Loading dataset manifest from {manifest_path}")
+            train_pairs, val_pairs = load_pairs_manifest(manifest_path)
+            print(f"[data] Manifest contains {len(train_pairs)} train / {len(val_pairs)} val pairs")
+        else:
+            if manifest_path.exists():
+                print(f"[data] Refreshing dataset manifest at {manifest_path}")
+            else:
+                print(f"[data] Creating dataset manifest at {manifest_path}")
+            train_pairs = collect_isic_pairs(train_images, train_masks)
+            val_pairs = collect_isic_pairs(val_images, val_masks)
+            print(f"[data] Collected {len(train_pairs)} train / {len(val_pairs)} val pairs")
+            metadata = {
+                "train_images": str(train_images),
+                "train_masks": str(train_masks),
+                "val_images": str(val_images),
+                "val_masks": str(val_masks),
+                "seed": args.seed,
+            }
+            write_pairs_manifest(manifest_path, train_pairs, val_pairs, metadata=metadata)
 
     train_ds, val_ds, train_count, val_count = prepare_isic_train_val_datasets(
         train_image_dir=train_images,
@@ -489,10 +583,30 @@ def train(args: argparse.Namespace) -> None:
         train_batch_size=batch_size,
         val_batch_size=batch_size,
         seed=args.seed,
+        train_pairs=train_pairs,
+        val_pairs=val_pairs,
     )
 
     steps_per_epoch = math.ceil(train_count / batch_size)
     val_steps = math.ceil(val_count / batch_size)
+
+    test_ds: Optional[tf.data.Dataset] = None
+    test_steps = 0
+    test_count = 0
+    try:
+        test_ds, test_count = build_isic_dataset(
+            image_dir=test_images,
+            mask_dir=test_masks,
+            batch_size=batch_size,
+            image_size=image_size,
+            augment=False,
+            shuffle=False,
+            seed=args.seed,
+        )
+        test_steps = math.ceil(test_count / batch_size)
+        print(f"[data] Test split contains {test_count} samples")
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"[warn] Skipping test evaluation: {exc}")
 
     model = build_adaptive_depth_unet(
         input_size=image_size,
@@ -513,8 +627,9 @@ def train(args: argparse.Namespace) -> None:
 
     summary_lines: List[str] = []
     model.summary(print_fn=summary_lines.append)
-    for line in summary_lines:
-        print(line)
+    if args.print_model_summary:
+        for line in summary_lines:
+            print(line)
 
     model_dir = Path(args.model_dir or MODEL_ROOT).expanduser()
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -540,10 +655,17 @@ def train(args: argparse.Namespace) -> None:
         epochs=epochs,
         validation_data=val_ds,
         callbacks=callbacks,
-        verbose=1,
+        verbose=args.fit_verbose,
     )
 
+    if ckpt_path.exists():
+        print(f"[model] Loading best checkpoint from {ckpt_path} for evaluation")
+        model.load_weights(str(ckpt_path))
+
     eval_metrics = model.evaluate(val_ds, return_dict=True, verbose=1)
+    test_metrics: Optional[Dict[str, float]] = None
+    if test_ds is not None:
+        test_metrics = model.evaluate(test_ds, return_dict=True, verbose=1)
 
     config_payload = {
         "protocol": protocol.key,
@@ -557,15 +679,23 @@ def train(args: argparse.Namespace) -> None:
         "val_samples": val_count,
         "train_steps_per_epoch": steps_per_epoch,
         "val_steps": val_steps,
+        "test_samples": test_count,
+        "test_steps": test_steps,
         "seed": args.seed,
         "mixed_precision": bool(args.mixed_precision),
+        "fit_verbose": args.fit_verbose,
+        "print_model_summary": bool(args.print_model_summary),
         "threshold": DEFAULT_THRESHOLD,
         "model_checkpoint": str(ckpt_path),
         "train_images": str(train_images),
         "train_masks": str(train_masks),
         "val_images": str(val_images),
         "val_masks": str(val_masks),
+        "test_images": str(test_images),
+        "test_masks": str(test_masks),
+        "pairs_manifest": str(manifest_path) if manifest_path else None,
         "metrics": eval_metrics,
+        "test_metrics": test_metrics,
     }
     (run_dir / "config.json").write_text(json.dumps(config_payload, indent=2))
     (run_dir / "model_summary.txt").write_text("\n".join(summary_lines))
@@ -573,6 +703,11 @@ def train(args: argparse.Namespace) -> None:
     print("Validation metrics:")
     for key, value in eval_metrics.items():
         print(f"  {key}: {value:.4f}")
+
+    if test_metrics:
+        print("Test metrics:")
+        for key, value in test_metrics.items():
+            print(f"  {key}: {value:.4f}")
 
 
 # --------------------------------------------------------------------------- #
@@ -600,10 +735,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_dir", type=str, default=str(MODEL_ROOT))
     parser.add_argument("--log_dir", type=str, default=str(LOG_ROOT))
     parser.add_argument("--run_name", type=str, default=None)
+    parser.add_argument(
+        "--print_model_summary",
+        action="store_true",
+        help="Print the full Keras model summary to stdout (default: off).",
+    )
+    parser.add_argument(
+        "--fit_verbose",
+        type=int,
+        default=2,
+        choices=(0, 1, 2),
+        help="Verbosity level for model.fit (0=silent, 1=per-batch bar, 2=per-epoch).",
+    )
     parser.add_argument("--train_images", type=str, default=None, help="Override training image directory.")
     parser.add_argument("--train_masks", type=str, default=None, help="Override training mask directory.")
     parser.add_argument("--val_images", type=str, default=None, help="Override validation image directory.")
     parser.add_argument("--val_masks", type=str, default=None, help="Override validation mask directory.")
+    parser.add_argument("--test_images", type=str, default=None, help="Override test image directory.")
+    parser.add_argument("--test_masks", type=str, default=None, help="Override test mask directory.")
+    parser.add_argument(
+        "--pairs_manifest",
+        type=str,
+        default=None,
+        help="JSON file enumerating train/val pairs so experiments share identical data.",
+    )
+    parser.add_argument(
+        "--refresh_pairs_manifest",
+        action="store_true",
+        help="Rebuild the manifest even if it already exists.",
+    )
     return parser.parse_args()
 
 

@@ -1,7 +1,0 @@
-scale=0.20
-batch_size=8
-depth=3
-run_name=exp1_depth3_scale0.20
-log_dir=/home/knarwani/thesis/git/Adaptive-Depth-U-Net-for-Image-Super-Resolution-Segmentation/Super_resolution/experiments/experiment_1_constant_depth_3/logs/exp1_depth3_scale0.20_20251105-144611
-model_dir=/home/knarwani/thesis/git/Adaptive-Depth-U-Net-for-Image-Super-Resolution-Segmentation/Super_resolution/models/Experiment_1/exp1_depth3_scale0.20_20251105-144611
-submitted=2025-11-05T14:46:11+01:00

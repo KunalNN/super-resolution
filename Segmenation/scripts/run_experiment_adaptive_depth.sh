@@ -9,29 +9,31 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SBATCH_SCRIPT="$SCRIPT_DIR/train_adaptive_simple.sbatch"
 
-SCRATCH_ROOT="${SR_SCRATCH_ROOT:-/scratch/knarwani/Final_data/Super_resolution}"
-if [[ ! -d "$SCRATCH_ROOT" ]]; then
-  echo "[error] Scratch root not found: $SCRATCH_ROOT" >&2
-  echo "        Set SR_SCRATCH_ROOT to the desired scratch location before running." >&2
-  exit 1
-fi
-
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_EXPERIMENT_ROOT="$REPO_ROOT/experiments/experiment_2_adaptive_depth"
-SCRATCH_EXPERIMENT_ROOT="$SCRATCH_ROOT/experiments/experiment_2_adaptive_depth"
 
-LOG_BASE="/home/knarwani/thesis/git/Adaptive-Depth-U-Net-for-Image-Super-Resolution-Segmentation/Super_resolution/logs/experiment_2"
-MODEL_BASE="/home/knarwani/thesis/git/Adaptive-Depth-U-Net-for-Image-Super-Resolution-Segmentation/Super_resolution/models/Experiment_2"
-EVAL_BASE="/home/knarwani/thesis/git/Adaptive-Depth-U-Net-for-Image-Super-Resolution-Segmentation/Super_resolution/logs/experiment2/evaluation"
-SUMMARY_ARCHIVE_BASE="/home/knarwani/thesis/git/Adaptive-Depth-U-Net-for-Image-Super-Resolution-Segmentation/Super_resolution/logs/experiment_2"
+SCRATCH_ROOT="${SEG_SCRATCH_ROOT:-/scratch/$USER/Segmenation}"
+SCRATCH_EXPERIMENT_ROOT="$SCRATCH_ROOT/experiment_2_adaptive_depth"
+LOG_BASE="$SCRATCH_EXPERIMENT_ROOT/logs"
+MODEL_BASE="$SCRATCH_EXPERIMENT_ROOT/models"
 META_BASE="$REPO_EXPERIMENT_ROOT/metadata"
+PAIRS_MANIFEST="$REPO_ROOT/manifests/isic2017_train_val_pairs.json"
+GLOBAL_EXTRA_ARGS="${GLOBAL_EXTRA_ARGS:-}"
+PROTOCOL="${PROTOCOL:-A}"
+export PROTOCOL
 
 if [[ ! -f "$SBATCH_SCRIPT" ]]; then
   echo "[error] Expected sbatch script not found at $SBATCH_SCRIPT" >&2
   exit 1
 fi
 
-mkdir -p "$LOG_BASE" "$MODEL_BASE" "$META_BASE"
+if [[ ! -d "$SCRATCH_ROOT" ]]; then
+  echo "[error] Scratch root not found: $SCRATCH_ROOT" >&2
+  echo "        Set SEG_SCRATCH_ROOT to the desired scratch location before running." >&2
+  exit 1
+fi
+
+mkdir -p "$LOG_BASE" "$MODEL_BASE" "$META_BASE" "$(dirname "$PAIRS_MANIFEST")"
 
 # Design table: target depth per scale with conservative batch sizes for a 2080 Ti.
 SCALES=(
@@ -77,12 +79,12 @@ for scale in "${SCALES[@]}"; do
 
   export SCALE="$scale"
   export BATCH_SIZE="$batch_size"
+  export DEPTH="$depth"
   export LOG_DIR="$log_dir"
   export MODEL_DIR="$model_dir"
   export RUN_NAME="$run_name"
-  export EXTRA_ARGS="--depth_override ${depth} --max_depth ${depth}"
-  export EVAL_OUTPUT_DIR="$EVAL_BASE"
-  export SUMMARY_ARCHIVE_DIR="$SUMMARY_ARCHIVE_BASE"
+  export PAIRS_MANIFEST="$PAIRS_MANIFEST"
+  export EXTRA_ARGS="$GLOBAL_EXTRA_ARGS"
 
   {
     echo "scale=${scale}"
@@ -91,6 +93,7 @@ for scale in "${SCALES[@]}"; do
     echo "run_name=${run_name}"
     echo "log_dir=${log_dir}"
     echo "model_dir=${model_dir}"
+    echo "pairs_manifest=${PAIRS_MANIFEST}"
     echo "submitted=$(date --iso-8601=seconds)"
   } > "$META_BASE/${run_suffix}.txt"
 

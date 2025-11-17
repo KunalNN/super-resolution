@@ -15,7 +15,7 @@ set -euo pipefail
 
 REPO_DIR="/home/knarwani/thesis/git/Adaptive-Depth-U-Net-for-Image-Super-Resolution-Segmentation"
 SEG_DIR="$REPO_DIR/Segmenation"
-PY_SCRIPT="$SEG_DIR/code/unet_vinillia.py"
+PY_SCRIPT="$SEG_DIR/code/train_adaptive_unet.py"
 PYTHON_BIN="$REPO_DIR/Super_resolution/.venv/bin/python"
 VENV_ACTIVATE="$REPO_DIR/Super_resolution/.venv/bin/activate"
 
@@ -85,9 +85,9 @@ TRAIN_MASK_DIR="${TRAIN_MASK_DIR:-${DATASET_PATHS[1]}}"
 VAL_IMAGE_DIR="${VAL_IMAGE_DIR:-${DATASET_PATHS[2]}}"
 VAL_MASK_DIR="${VAL_MASK_DIR:-${DATASET_PATHS[3]}}"
 MODEL_DIR="${MODEL_DIR:-${DATASET_PATHS[4]}}"
-LOG_ROOT="${LOG_ROOT:-$SEG_DIR/logs}"
+LOG_DIR="${LOG_DIR:-$SEG_DIR/logs/runs}"
 
-mkdir -p "$MODEL_DIR" "$LOG_ROOT"
+mkdir -p "$MODEL_DIR" "$LOG_DIR"
 
 for dir_path in "$TRAIN_IMAGE_DIR" "$TRAIN_MASK_DIR" "$VAL_IMAGE_DIR" "$VAL_MASK_DIR"; do
   if [[ ! -d "$dir_path" ]]; then
@@ -97,20 +97,22 @@ for dir_path in "$TRAIN_IMAGE_DIR" "$TRAIN_MASK_DIR" "$VAL_IMAGE_DIR" "$VAL_MASK
 done
 
 IMAGE_SIZE="${IMAGE_SIZE:-256}"
-BATCH_SIZE="${BATCH_SIZE:-8}"
-EPOCHS="${EPOCHS:-60}"
-LEARNING_RATE="${LEARNING_RATE:-0.0001}"
-BASE_CHANNELS="${BASE_CHANNELS:-32}"
+BATCH_SIZE="${BATCH_SIZE:-0}"
+EPOCHS="${EPOCHS:-0}"
+BASE_CHANNELS="${BASE_CHANNELS:-64}"
 DEPTH="${DEPTH:-4}"
-SEED="${SEED:-13}"
-IMAGE_SUFFIX="${IMAGE_SUFFIX:-.jpg}"
-MASK_SUFFIX="${MASK_SUFFIX:-_segmentation.png}"
-LIMIT_TRAIN="${LIMIT_TRAIN:-}"
-LIMIT_VAL="${LIMIT_VAL:-}"
+PROTOCOL="${PROTOCOL:-A}"
+SEED="${SEED:-42}"
+PATIENCE="${PATIENCE:-}"
 RUN_NAME="${RUN_NAME:-}"
-AUGMENT="${AUGMENT:-1}"
 MIXED_PRECISION="${MIXED_PRECISION:-1}"
+PAIRS_MANIFEST="${PAIRS_MANIFEST:-$SEG_DIR/manifests/isic2017_train_val_pairs.json}"
+REFRESH_PAIRS_MANIFEST="${REFRESH_PAIRS_MANIFEST:-0}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
+
+if [[ -n "$PAIRS_MANIFEST" ]]; then
+  mkdir -p "$(dirname "$PAIRS_MANIFEST")"
+fi
 
 PIP_CUDA_PATHS="$("$PYTHON_BIN" - <<'PY'
 import os, site
@@ -152,25 +154,24 @@ fi
 ts="$(date +%Y%m%d-%H%M%S)"
 run_tag="${RUN_NAME:-unet}"
 run_tag="${run_tag// /_}"
-RUN_LOG="$LOG_ROOT/train-${run_tag}-${ts}.log"
+RUN_LOG="$LOG_DIR/train-${run_tag}-${ts}.log"
 
-echo "[seg-config] images=$TRAIN_IMAGE_DIR masks=$TRAIN_MASK_DIR model_dir=$MODEL_DIR log_root=$LOG_ROOT"
+echo "[seg-config] protocol=$PROTOCOL images=$TRAIN_IMAGE_DIR masks=$TRAIN_MASK_DIR model_dir=$MODEL_DIR log_dir=$LOG_DIR manifest=$PAIRS_MANIFEST"
 
 CMD=(
   "$PYTHON_BIN" -u "$PY_SCRIPT"
-  --train_image_dir "$TRAIN_IMAGE_DIR"
-  --train_mask_dir "$TRAIN_MASK_DIR"
-  --val_image_dir "$VAL_IMAGE_DIR"
-  --val_mask_dir "$VAL_MASK_DIR"
-  --image_suffix "$IMAGE_SUFFIX"
-  --mask_suffix "$MASK_SUFFIX"
+  --protocol "$PROTOCOL"
+  --train_images "$TRAIN_IMAGE_DIR"
+  --train_masks "$TRAIN_MASK_DIR"
+  --val_images "$VAL_IMAGE_DIR"
+  --val_masks "$VAL_MASK_DIR"
   --image_size "$IMAGE_SIZE"
   --batch_size "$BATCH_SIZE"
   --epochs "$EPOCHS"
-  --learning_rate "$LEARNING_RATE"
   --base_channels "$BASE_CHANNELS"
   --depth "$DEPTH"
   --model_dir "$MODEL_DIR"
+  --log_dir "$LOG_DIR"
   --seed "$SEED"
 )
 
@@ -178,20 +179,19 @@ if [[ -n "$RUN_NAME" ]]; then
   CMD+=(--run_name "$RUN_NAME")
 fi
 
-if [[ -n "$LIMIT_TRAIN" ]]; then
-  CMD+=(--limit_train "$LIMIT_TRAIN")
-fi
-
-if [[ -n "$LIMIT_VAL" ]]; then
-  CMD+=(--limit_val "$LIMIT_VAL")
-fi
-
-if [[ "$AUGMENT" != "0" ]]; then
-  CMD+=(--augment)
+if [[ -n "$PATIENCE" ]]; then
+  CMD+=(--patience "$PATIENCE")
 fi
 
 if [[ "$MIXED_PRECISION" != "0" ]]; then
   CMD+=(--mixed_precision)
+fi
+
+if [[ -n "$PAIRS_MANIFEST" ]]; then
+  CMD+=(--pairs_manifest "$PAIRS_MANIFEST")
+  if [[ "$REFRESH_PAIRS_MANIFEST" != "0" ]]; then
+    CMD+=(--refresh_pairs_manifest)
+  fi
 fi
 
 if [[ -n "$EXTRA_ARGS" ]]; then
