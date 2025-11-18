@@ -1,0 +1,8 @@
+scale=0.20
+batch_size=8
+depth=1
+run_name=exp2_adaptive_depth_scale0.20
+log_dir=/home/knarwani/thesis/git/Adaptive-Depth-U-Net-for-Image-Super-Resolution-Segmentation/Segmenation/experiments/experiment_2_adaptive_depth/runs/logs/exp2_adaptive_depth_scale0.20_20251118-150958
+model_dir=/home/knarwani/thesis/git/Adaptive-Depth-U-Net-for-Image-Super-Resolution-Segmentation/Segmenation/experiments/experiment_2_adaptive_depth/runs/models/exp2_adaptive_depth_scale0.20_20251118-150958
+pairs_manifest=/home/knarwani/thesis/git/Adaptive-Depth-U-Net-for-Image-Super-Resolution-Segmentation/Segmenation/manifests/isic2017_train_val_pairs.json
+submitted=2025-11-18T15:09:58+01:00

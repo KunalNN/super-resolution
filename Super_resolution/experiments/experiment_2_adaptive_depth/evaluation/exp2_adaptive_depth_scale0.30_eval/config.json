@@ -1,0 +1,14 @@
+{
+  "model_path": "/home/knarwani/thesis/git/Adaptive-Depth-U-Net-for-Image-Super-Resolution-Segmentation/Super_resolution/models/Experiment_2/exp2_adaptive_depth_scale0.30_20251107-143303/unet_adaptive_scale_new_loss0.30_depth2.keras",
+  "scale": 0.3,
+  "hr_dir": "/scratch/knarwani/Final_data/Super_resolution/DIV2K_valid_HR",
+  "patch_size": 256,
+  "eval_stride": 256,
+  "batch_size": 8,
+  "limit": null,
+  "eval_shave": 6,
+  "depth_override": 2,
+  "samples": 3598,
+  "images": 100,
+  "created_at": "20251107-173540"
+}
